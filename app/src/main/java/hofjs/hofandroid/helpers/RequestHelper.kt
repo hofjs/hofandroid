@@ -21,6 +21,6 @@ class RequestHelper(val context: Context)  {
 
         val response = client.newCall(request.build()).execute()
 
-        return response.body?.string()
+        return response.body.string()
     }
 }

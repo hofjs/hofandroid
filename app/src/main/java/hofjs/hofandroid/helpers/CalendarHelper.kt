@@ -16,21 +16,25 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 
+
 class CalendarHelper(val context: Context) {
-    var requestPermissionLauncher: ActivityResultLauncher<String>
+    val multiplePermissionsContract: ActivityResultContracts.RequestMultiplePermissions
+    var requestPermissionLauncher: ActivityResultLauncher<Array<String>>
     var action: () -> Unit
 
     init {
         action = { }
 
+        multiplePermissionsContract = ActivityResultContracts.RequestMultiplePermissions()
+
         requestPermissionLauncher = (context as ActivityResultCaller)
-            .registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-                    isGranted: Boolean -> if (isGranted) action()
+            .registerForActivityResult(multiplePermissionsContract) {
+                    permissions -> if (permissions.all { it.value }) action()
             }
     }
 
     fun showAccountChooser(title: String, resultAction: (entriesImported: Long?) -> Unit) {
-        requestPermission(Manifest.permission.WRITE_CALENDAR) {
+        requestPermission(arrayOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR)) {
             queryCalendars { foundAccounts ->
                 if (foundAccounts.isEmpty())
                     resultAction(null) // No account found
@@ -43,7 +47,7 @@ class CalendarHelper(val context: Context) {
                         setAdapter(adapter) { _, which ->
                             resultAction(foundAccounts[which].first) // Selected account
                         }
-                        setNegativeButton(android.R.string.cancel) { _, which ->
+                        setNegativeButton(android.R.string.cancel) { _, _ ->
                             resultAction(-1) // No account selected
                         }
                         show()
@@ -68,7 +72,7 @@ class CalendarHelper(val context: Context) {
         resultAction(calendarEvents.size, deletedCalendarEvents)
     }
 
-    private fun getCalendarEvents(icalData: String): List<CalendarEvent> {
+    fun getCalendarEvents(icalData: String): List<CalendarEvent> {
         val calendarEvents = mutableListOf<CalendarEvent>()
 
         var calendarEvent = CalendarEvent()
@@ -94,9 +98,9 @@ class CalendarHelper(val context: Context) {
                     calendarEvent.title = getCalendarEntryValue(icalEntry)
                 else if (icalLine.startsWith("DESCRIPTION:"))
                     calendarEvent.description = getCalendarEntryValue(icalEntry)
-                else if (icalLine.startsWith("DTSTART;"))
+                else if (icalLine.startsWith("DTSTART:"))
                     calendarEvent.icalStartDate = getCalendarEntryValue(icalEntry)
-                else if (icalLine.startsWith("DTEND;"))
+                else if (icalLine.startsWith("DTEND:"))
                     calendarEvent.icalEndDate = getCalendarEntryValue(icalEntry)
                 else if (icalEntry.startsWith("LOCATION:"))
                     calendarEvent.location = getCalendarEntryValue(icalEntry)
@@ -124,13 +128,13 @@ class CalendarHelper(val context: Context) {
 
     data class CalendarReminder(var description: String = "", var trigger: String = "")
 
-    fun requestPermission(permission: String, action: () -> Unit) {
+    fun requestPermission(permissions: Array<String>, action: () -> Unit) {
         this.action = action
 
-        if (ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED)
+        if (permissions.all { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED })
             this.action()
         else
-            requestPermissionLauncher.launch(permission)
+            requestPermissionLauncher.launch(permissions)
     }
 
     fun queryCalendars(accountsFoundCallback: (List<Pair<Long, String>>) -> Unit) {
@@ -209,7 +213,7 @@ class CalendarHelper(val context: Context) {
             put(CalendarContract.Events.DTSTART, dtStart)
             put(CalendarContract.Events.DTEND, dtEnd)
             put(CalendarContract.Events.EVENT_LOCATION, location)
-            put(CalendarContract.Events.EVENT_TIMEZONE, "Europe/Berlin")
+            put(CalendarContract.Events.EVENT_TIMEZONE, "UTC")
             put(CalendarContract.Events.RDATE, rdate)
         }
 
@@ -277,7 +281,7 @@ class CalendarHelper(val context: Context) {
 
     private fun convertFromIcalDate(icalDate: String): Long {
         return ZonedDateTime.parse(icalDate, DateTimeFormatter.ofPattern( "uuuuMMdd'T'HHmmss'Z'" )
-            .withZone(ZoneId.systemDefault())).toInstant().toEpochMilli()
+            .withZone(ZoneId.of("UTC"))).toInstant().toEpochMilli()
     }
 
     private fun convertToIcalDate(instant: Instant): String {
