@@ -12,21 +12,23 @@ import android.webkit.*
 import android.webkit.WebView.WebViewTransport
 import androidx.appcompat.app.AppCompatActivity
 import androidx.webkit.WebViewAssetLoader
-import java.io.IOException
-import java.io.InputStream
-import java.net.URL
+import okhttp3.*
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLConnection
+import java.util.concurrent.TimeUnit
 
 open class PwaActivity: AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var assetLoader: WebViewAssetLoader
+    private val httpClient = OkHttpClient.Builder().readTimeout(60, TimeUnit.SECONDS).build()
+    private val fetchDetails: MutableMap<String, String> = mutableMapOf()
 
     // Origin needs to be set to domain instead of *, because fetch option "credentials: include"
     // does not work with * and is required to pass cookies such as login cookies to server
     private val corsHeaders = mapOf(
-        "Access-Control-Allow-Origin" to "https://${WebViewAssetLoader.DEFAULT_DOMAIN}",
-        "Access-Control-Allow-Credentials" to "true",
-        "Access-Control-Allow-Headers" to "Content-Type, Authorization"
+        "access-control-allow-origin" to "https://${WebViewAssetLoader.DEFAULT_DOMAIN}",
+        "access-control-allow-credentials" to "true",
+        "access-control-allow-headers" to "Content-Type, Authorization"
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -90,9 +92,15 @@ open class PwaActivity: AppCompatActivity() {
         // remote assets with cors headers
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest) =
-                loadUrl(request.url)
+                loadUrl(request)
 
-            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?) = true
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val url = request?.url.toString()
+                if (url.startsWith("geo:"))
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+
+                return true
+            }
         }
 
         // Support links with target="_blank" to open in new browser window
@@ -105,11 +113,18 @@ open class PwaActivity: AppCompatActivity() {
         return webView
     }
 
-    private fun loadUrl(url: Uri) =
-        if (url.toString().startsWith("https://${WebViewAssetLoader.DEFAULT_DOMAIN}"))
-            assetLoader.shouldInterceptRequest(url)
+    @JavascriptInterface
+    fun addFetchDetails(url: String, body: String) {
+        fetchDetails[url] = body
+    }
+
+    private fun loadUrl(request: WebResourceRequest): WebResourceResponse? {
+        if (request.url.toString().startsWith("https://${WebViewAssetLoader.DEFAULT_DOMAIN}"))
+            return loadAssetRequest(request)
         else
-            loadCorsRequest(url)
+            return loadCorsRequest(request)
+    }
+
 
     private fun loadUrlInNewWindow(loadUrlMessage: Message): Boolean {
         // From Android 10 regular approach to get url via view.getHitTestResult().getExtra() no
@@ -125,29 +140,63 @@ open class PwaActivity: AppCompatActivity() {
                     val browserIntent = Intent(Intent.ACTION_VIEW, (request.url))
                     newWebView.context.startActivity(browserIntent)
                 }
-                return false
+                return true
             }
         }
         return true
     }
 
-    private fun loadCorsRequest(url: Uri): WebResourceResponse {
-        var inputStream: InputStream? = null
+    private fun loadAssetRequest(request: WebResourceRequest): WebResourceResponse? {
+        val response = assetLoader.shouldInterceptRequest(request.url)
 
-        // Load remote url
-        try {
-            inputStream = URL(url.toString()).openConnection().getInputStream()
-        } catch (e: IOException) {
-            e.printStackTrace()
-        }
-
-        // Detect content type
-        val contentType: String = URLConnection.guessContentTypeFromName(url.path) ?: "application/javascript"
-
-        // Patch response header to support cors requests
-        val response = WebResourceResponse(contentType, "utf-8", inputStream)
-        response.responseHeaders = corsHeaders
+        // Support js modules mime type on Android API level < 30
+        if (request.url.toString().endsWith(".js") && response?.mimeType == "text/plain")
+            response.mimeType = "application/javascript"
 
         return response
+    }
+
+    private fun loadCorsRequest(request: WebResourceRequest): WebResourceResponse? {
+        val urlWithRequestId = request.url.toString()
+        val url = urlWithRequestId.split("###uniqueRequestId")[0]
+
+        val method = request.method
+
+        val headers = request.requestHeaders.run {
+            val result = Headers.Builder()
+            this.forEach { result.add(it.key.lowercase(), it.value) }
+            result.build()
+        }
+        val body = if ((method == "POST" || method == "PUT") && fetchDetails.containsKey(urlWithRequestId))
+            fetchDetails[urlWithRequestId]?.toRequestBody() else null
+
+        try {
+            val request = Request.Builder()
+                .url(url)
+                .method(method, body)
+                .headers(headers)
+                .build()
+            httpClient.newCall(request).execute()
+                .let { response: Response ->
+                    val responseHeaders = response.headers.toMap()
+
+                    // Detect content type
+                    val contentType: String =
+                        URLConnection.guessContentTypeFromName(url)
+                            ?: "application/javascript"
+
+                    // Patch response header to support cors requests
+                    val response =
+                        WebResourceResponse(contentType, "utf-8", response.body.byteStream())
+                    response.responseHeaders = responseHeaders + corsHeaders
+
+                    return response
+                }
+        }
+        catch (e: Exception) {
+            e.printStackTrace()
+
+            return null
+        }
     }
 }
